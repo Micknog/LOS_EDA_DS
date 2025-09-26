@@ -1,0 +1,63 @@
+import numpy as np, pandas as pd, statsmodels.api as sm
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+# === Parâmetros
+ycol      = 'TARGET_1'        # sua target
+TRAIN_END = '2025-01-31'      # último dia do treino
+s         = 7                 # sazonalidade semanal
+orders    = [(0,1,0),(1,1,0),(0,1,1),(1,1,1)]
+sorders   = [(0,0,0,s),(1,0,0,s),(0,0,1,s),(1,0,1,s)]
+
+# === Série e split
+y = df[ycol].astype(float).copy()
+y_train = y.loc[:TRAIN_END]
+y_test  = y.loc[pd.to_datetime(TRAIN_END)+pd.Timedelta(days=1):]
+
+# === Exógenas simples (DOW + início de mês)
+def make_exog(idx: pd.DatetimeIndex):
+    X = pd.DataFrame(index=idx)
+    X['dow'] = idx.dayofweek
+    X['month_start'] = idx.is_month_start.astype(int)
+    X = pd.get_dummies(X, columns=['dow'], drop_first=True)  # evita multicolinearidade
+    X = sm.add_constant(X, has_constant='add')               # intercepto nas exógenas
+    return X
+
+X_train = make_exog(y_train.index)
+X_test  = make_exog(y_test.index)
+
+# === Fit rápido: pequeno grid e escolhe por AIC
+results = []
+for o in orders:
+    for so in sorders:
+        try:
+            mod = SARIMAX(
+                y_train, exog=X_train,
+                order=o, seasonal_order=so,
+                trend='n',                        # intercepto vem nas exógenas (const)
+                enforce_stationarity=False, enforce_invertibility=False
+            )
+            res = mod.fit(disp=False)
+            results.append((o, so, res.aic, res))
+        except Exception as e:
+            pass
+
+best = sorted(results, key=lambda x: x[2])[0]
+(o_best, so_best, aic_best, res_best) = best
+
+# === Forecast H=3 (usando o início do teste)
+H = 3
+fc = res_best.get_forecast(steps=H, exog=X_test.iloc[:H])
+pred = fc.predicted_mean
+real = y_test.iloc[:H]
+
+# === Métricas (curtas) por horizonte
+err  = real.values - pred.values
+mae  = np.abs(err).mean()
+smape = (np.abs(err) / ((np.abs(real.values)+np.abs(pred.values))/2)).mean()*100
+bias = err.mean()
+
+print("Best order:", o_best, "| Best seasonal_order:", so_best, "| AIC:", round(aic_best,2))
+print("Real (H1..H3):", real.values)
+print("Pred (H1..H3):", pred.values)
+print("Err  (H1..H3):", err)
+print(f"MAE={mae:.3f} | sMAPE={smape:.2f}% | Bias={bias:.3f}")
