@@ -1,0 +1,71 @@
+import numpy as np
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
+import warnings
+
+def fit_sarimax_robust(y_tr, X_tr, order, sorder, force_stationary=True):
+    """
+    Tenta convergir em 3 passos crescentes:
+      1) LBFGS (rápido)
+      2) Powell (robusto p/ superfície chata)
+      3) Nelder-Mead (teimoso)
+    Com ajustes que ajudam a estabilidade numérica.
+    Retorna (res, method_used) ou (None, motivo)
+    """
+    # Regras de sanidade que evitam fits inviáveis
+    s = sorder[-1]
+    if len(y_tr) < max(40, 3*s):             # precisa de amostra mínima (>= ~3 ciclos sazonais)
+        return None, f"too_short_{len(y_tr)}"
+
+    y_tr = y_tr.astype(float)
+    X_tr = X_tr.astype(float)
+
+    # monta o modelo com opções que estabilizam
+    mod = SARIMAX(
+        y_tr, exog=X_tr,
+        order=order, seasonal_order=sorder,
+        trend='n',
+        enforce_stationarity=force_stationary,
+        enforce_invertibility=force_stationary,
+        concentrate_scale=True,          # reduz parâmetro livre da variância
+        simple_differencing=True         # diferencia fora do estado-esp. (melhora numérica)
+    )
+
+    # 1) LBFGS
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            res = mod.fit(method="lbfgs", maxiter=300, disp=False)
+        if res.mle_retvals.get("converged", False):
+            return res, "lbfgs"
+    except Exception as e:
+        last_err = f"lbfgs:{e}"
+
+    # 2) Powell
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            res = mod.fit(method="powell", maxiter=600, disp=False)
+        if res.mle_retvals.get("converged", False):
+            return res, "powell"
+    except Exception as e:
+        last_err = f"powell:{e}"
+
+    # 3) Nelder-Mead
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            res = mod.fit(method="nm", maxiter=800, disp=False)
+        # Mesmo se nm não marcar converged=True, costuma dar params estáveis:
+        return res, "nm_partial"
+    except Exception as e:
+        last_err = f"nm:{e}"
+        return None, last_err
+
+
+res, how = fit_sarimax_robust(y_tr, X_tr, order, sorder, force_stationary=True)
+if res is None:
+    rows.append({'train_size': label, 'type': label_type, 'train_end': t,
+                 'fit_ok': 0, 'err': how})
+    continue
+fc = res.get_forecast(steps=H, exog=X_te).predicted_mean
