@@ -1,0 +1,25 @@
+import pandas as pd
+import numpy as np
+import statsmodels.api as sm
+
+def mk_exog(idx: pd.DatetimeIndex):
+    X = pd.DataFrame(index=idx)
+    X['month_start'] = idx.is_month_start.astype('int8')
+    dows = pd.get_dummies(idx.dayofweek, prefix='dow', dtype='int8')
+    dows = dows.drop(columns=dows.columns[0])  # drop_first
+    X = pd.concat([X, dows], axis=1)
+    X = sm.add_constant(X, has_constant='add')
+    return X.astype('float64')
+
+X_train = mk_exog(y_train.index)
+X_test  = mk_exog(y_test.index)
+X_test  = X_test.reindex(columns=X_train.columns, fill_value=0).astype('float64')
+y_train = pd.to_numeric(y_train, errors='coerce').astype('float64')
+y_test  = pd.to_numeric(y_test,  errors='coerce').astype('float64')
+
+
+mod = SARIMAX(y_train, exog=X_train,
+              order=(1,1,0), seasonal_order=(0,0,0,7),
+              trend='n', enforce_stationarity=False, enforce_invertibility=False)
+res = mod.fit(disp=False)
+print("OK com exog | AIC:", res.aic)
