@@ -1,0 +1,45 @@
+import numpy as np, pandas as pd
+from statsmodels.tsa.stattools import acf
+
+# 1) Índice temporal e frequência
+df = df.sort_values('date').set_index('date')
+df.index = pd.DatetimeIndex(df.index)
+df = df.asfreq('D')  # ajuste pra diário; se não for diário, me diga qual é
+
+# 2) Checar gaps
+n_missing = df.isna().sum().to_dict()
+
+# Preencha temporariamente (só pra medir sazonalidade; depois voltamos e tratamos melhor)
+ycol = 'TARGET_1'  # troque p/ sua primeira target
+y = df[ycol].interpolate(limit_direction='both')
+
+# 3) Candidatos de sazonalidade via ACF
+ac = acf(y, nlags=30, fft=True, missing='conservative')
+lags = np.arange(len(ac))
+top = (pd.Series(ac[1:], index=lags[1:])
+         .sort_values(ascending=False)
+         .head(5))  # top 5 lags > 0
+
+# 4) Heurística semanal/quinzenal
+cand = []
+for k in [7,14]:
+    if k < len(ac):
+        cand.append((k, float(ac[k])))
+cand = sorted(cand, key=lambda x: -x[1])
+
+# 5) Força de sazonalidade simples (sem STL): razão ACF sazonal vs mediana dos lags
+baseline = float(np.median(np.abs(ac[1:8])))  # janela curta
+strength = {k: (ac[k]/baseline if baseline>0 else np.nan) for k,_ in cand}
+
+# 6) Variância (rolling std) pra ver necessidade de transformação
+roll = y.rolling(30, min_periods=15).std()
+roll_ratio = float(np.nanmedian(roll[-60:])) / float(np.nanmedian(roll[:60]))  # fim/início
+
+print("freq:", pd.infer_freq(df.index))
+print("index:", df.index.min(), "→", df.index.max(), "| shape:", df.shape)
+print("n_missing by col:", n_missing)
+print("ACF top lags (lag: corr):")
+print(top)
+print("Candidates s and ACF:", cand)
+print("Seasonality strength (relative):", strength)
+print("Rolling std ratio (end/start):", round(roll_ratio,3))
