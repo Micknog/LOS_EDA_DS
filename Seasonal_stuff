@@ -1,0 +1,134 @@
+from statsmodels.tsa.seasonal import STL
+from statsmodels.tsa.stattools import acf
+
+def infer_regular_freq(idx):
+    if isinstance(idx, pd.DatetimeIndex):
+        f = pd.infer_freq(idx)
+        if f is None:
+            # tenta pelo mediano
+            dt = np.median(np.diff(idx.view('i8')))
+            if dt <= 0: 
+                return None
+            return pd.to_timedelta(int(dt)).components
+    return None
+
+def _fft_candidates(y, k=5):
+    y = np.asarray(y, dtype=float)
+    y = y - np.nanmean(y)
+    n = len(y)
+    # janela simples pra reduzir vazamento espectral
+    w = np.hanning(n)
+    yf = np.fft.rfft((y - np.mean(y)) * w)
+    power = np.abs(yf)
+    freqs = np.fft.rfftfreq(n, d=1.0)
+    # ignora zero
+    freqs = freqs[1:]
+    power = power[1:]
+    # período = 1/f
+    periods = (1.0 / freqs)
+    # mantém períodos inteiros plausíveis
+    mask = (periods >= 2) & (periods <= n//3)
+    periods = periods[mask]
+    power = power[mask]
+    if len(periods) == 0:
+        return []
+    top = np.argsort(power)[-k:]
+    cands = np.unique(np.round(periods[top]).astype(int)).tolist()
+    return cands
+
+def _acf_candidates(y, k=5):
+    n = len(y)
+    nlags = min(n//2, 2000)
+    ac = acf(y, nlags=nlags, fft=True, missing='conservative')
+    ac = ac[1:]  # remove lag 0
+    lags = np.arange(1, len(ac)+1)
+    # picos relevantes: acima de 2/sqrt(N) (limite approx)
+    thr = 2/np.sqrt(n)
+    good = lags[(ac > thr) & (lags >= 2) & (lags <= n//3)]
+    if len(good) == 0:
+        return []
+    # pega top k por valor de acf
+    idx = np.argsort(ac[good-1])[-k:]
+    return np.unique(good[idx]).tolist()
+
+def seasonal_strength(y, period):
+    if period < 2 or len(y) < 3*period:
+        return np.nan
+    try:
+        res = STL(pd.Series(y), period=period, robust=True).fit()
+        remainder = res.resid.values
+        seasonal = res.seasonal.values
+        num = np.nanvar(remainder, ddof=1)
+        den = np.nanvar(remainder + seasonal, ddof=1)
+        if den <= 0:
+            return 0.0
+        return max(0.0, 1 - num/den)
+    except Exception:
+        return np.nan
+
+def rolling_strength(y, period):
+    n = len(y)
+    if n < 4*period:
+        return np.nan, np.nan
+    mid = n//2
+    s1 = seasonal_strength(y[:mid], period)
+    s2 = seasonal_strength(y[mid:], period)
+    return s1, s2
+
+def guess_seasonality(series, extra_candidates=None, common_guess=None, top_k=5):
+    """
+    series: pd.Series com index ordenado (idealmente DatetimeIndex), sem NaN internos (interpole antes se preciso)
+    extra_candidates: lista de períodos a testar (ex.: [7, 12, 24, 52])
+    common_guess: se você já desconfia da unidade (ex.: diário->7, mensal->12)
+    """
+    s = series.dropna()
+    y = s.values
+    n = len(y)
+    if n < 30:
+        return {'best_period': None, 'reason': 'Série curta', 'table': None}
+
+    # candidatos por FFT e ACF
+    c_fft = _fft_candidates(y, k=top_k)
+    c_acf = _acf_candidates(y, k=top_k)
+    c_set = set(c_fft) | set(c_acf)
+
+    # adiciona palpites comuns se fizer sentido
+    defaults = []
+    if common_guess:
+        defaults.append(common_guess)
+    defaults.extend([7, 12, 24, 52])
+
+    if extra_candidates:
+        defaults.extend(extra_candidates)
+
+    for c in defaults:
+        if 2 <= c <= n//3:
+            c_set.add(int(c))
+
+    cand = sorted(c_set)
+    if not cand:
+        return {'best_period': None, 'reason': 'Nenhum candidato válido', 'table': None}
+
+    rows = []
+    for p in cand:
+        S = seasonal_strength(y, p)
+        S1, S2 = rolling_strength(y, p)
+        drop = np.nan if (pd.isna(S1) or pd.isna(S2)) else (S1 - S2)
+        rows.append({'period': p, 'strength': S, 'strength_first_half': S1, 'strength_second_half': S2, 'delta_first_minus_second': drop})
+
+    df = pd.DataFrame(rows).sort_values(['strength', 'period'], ascending=[False, True]).reset_index(drop=True)
+
+    # decisão
+    best = df.iloc[0]
+    flag_global = (best['strength'] >= 0.60) and (pd.isna(best['delta_first_minus_second']) or best['delta_first_minus_second'] <= 0.15)
+    reason = 'global' if flag_global else 'fraca/local'
+
+    return {
+        'best_period': int(best['period']),
+        'strength': float(best['strength']) if pd.notna(best['strength']) else None,
+        'first_half': None if pd.isna(best['strength_first_half']) else float(best['strength_first_half']),
+        'second_half': None if pd.isna(best['strength_second_half']) else float(best['strength_second_half']),
+        'delta_first_minus_second': None if pd.isna(best['delta_first_minus_second']) else float(best['delta_first_minus_second']),
+        'classification': reason,
+        'table': df
+    }
