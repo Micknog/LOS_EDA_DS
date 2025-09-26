@@ -1,0 +1,14 @@
+def backtest(y, X, order, sorder, H, cutoffs):
+    resultados = []
+    for cutoff in cutoffs:
+        y_tr = y[:cutoff]
+        y_te = y[cutoff: cutoff+H]
+        X_tr = X.loc[y_tr.index]
+        X_te = X.loc[y_te.index]
+        m = SARIMAX(y_tr, exog=X_tr, order=order, seasonal_order=sorder, trend='n',
+                    enforce_stationarity=False, enforce_invertibility=False)
+        r = m.fit(disp=False)
+        fc = r.get_forecast(steps=H, exog=X_te).predicted_mean
+        err = y_te - fc
+        resultados.append(err)
+    return resultados
